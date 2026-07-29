@@ -48,8 +48,12 @@ class XanbusSniffer(object):
         # b'0303 d6d30000 f4640100 6874 9500 2f04 58 ff 8504 fffffffffffcff0000000000000000ffffff7fffff'
         #print(f'ConextBattMonStats: src = {src} len = {len(bytes)} bytes={binascii.hexlify(bytes)}')
         
-        f ='<BBIiHHHbbH21x'
-        fields = struct.unpack(f, bytes)
+        # Same defensive pattern as the other processors: payload lengths vary
+        # by device generation, layouts are prefix-stable.
+        if len(bytes) < 20:
+            return
+        f ='<BBIiHHHbbH'
+        fields = struct.unpack_from(f, bytes, 0)
         (status,assoc,voltage,current,battery_temperature,capacity_removed,capacity_remaining,soc,pad6,time_to_discharge) = fields
 
         #print(f'src={src} BATTMON voltage={voltage/1000}v current={current/1000}A battery_temperature={battery_temperature/1000}C capacity_removed={capacity_removed}Ah capacity_remaining={capacity_remaining}Ah soc={soc}% time_to_discharge={time_to_discharge}mins')
@@ -67,7 +71,12 @@ class XanbusSniffer(object):
         #print(f'{processBattSts2.__name__} src = {src} len = {len(bytes)} bytes={binascii.hexlify(bytes)}')
         # MPPT: b'0303 90d30000 98710000 26060000 ffff ffff 00ff ff41 ffffffffffffffffffffffff0330ffffffffff'
         # XW:   b'0303 f0d20000 9cebffff 19010000 ffff ffff 00ff ff56 ffffffffffffffffffffffffffffffffffffff'
-        (status,assoc,voltage,current,power) = struct.unpack('<BBIii27x', bytes)
+        # Payload length varies by device generation: an XW+ / MPPT 80 600 site
+        # sends 41 bytes here, but a Conext SW 4024 / MPPT 60 150 site sends 36.
+        # The field layout is prefix-stable, so unpack only the fields we use.
+        if len(bytes) < 14:
+            return
+        (status,assoc,voltage,current,power) = struct.unpack_from('<BBIii', bytes, 0)
         #print(f'src={src} DC USAGE: voltage={voltage/1000}v current={current/1000}A power={power}W')
 
     def processAcStsRms(self, src, bytes):
@@ -78,9 +87,15 @@ class XanbusSniffer(object):
         assoc = int(bytes[1])
         xw = self.all_xanbus_devices[src]
 
-        if len(bytes) == 55:
-            #print(f'assoc = {assoc}')
-            if assoc == 0x13 or assoc == 0x33:
+        # Payload length varies by device generation: an XW+ sends 55 bytes
+        # (load/gen) or 83 (grid response), while e.g. a Conext SW 4024 sends
+        # 78 for all associations. The 49-byte field prefix is stable, so
+        # branch on the association id (0x13=AC2/gen, 0x33=loads, 0x43=AC1/
+        # grid -- see the comments above) rather than the exact length, and
+        # unpack with unpack_from.
+        if len(bytes) < 49:
+            return
+        if assoc == 0x13 or assoc == 0x33:
                 #print(f'{processAcStsRms.__name__} src = {src} len = {len(bytes)} bytes={binascii.hexlify(bytes)}')
                 # b'03 33 fc 01 ff 58d80100   be05        00 00 04 6f17 ffff 1601 00 00 1601 00 00 04 7f 02 ff 58d80100      e812        00 00 10 6f17   ffff  9f02  0000 9f02 0000 0a 7fffff'
                 # b'03 33 fc 01 ff dad30100   040b        00 00 09 6e17 ffff b501 00 00 b501 00 00 06 7f 02 ff dad30100      460a        00 00 08 6e17   ffff  a401  0000 a401 0000 06 7fffff'
@@ -92,7 +107,7 @@ class XanbusSniffer(object):
                 # b'03 33 fc 01 ff 42d50100   c206        00 00 05 7017 ffff f900 00 00 f900 00 00 03 7f 02 ff 42d50100      cc06        00 00 05 7017   ffff  2301  0000 2301 0000 04 7fffff'
                 #                  LOAD_V_LN1 LOAD_I_LN1           GF1  GF2  p11        p15                    LOAD_V_LN_2   LOAD_I_LN2           LOAD_F AC2_F pad28      pad30
                 #   B  B  B  B  B  I          h           B  B  B  h    h    h     B  B  h     B  B  B  B  B  B  I             h           B  B  B  h      h     H     h    H
-                (status,assoc,p1,p2,p3,load_v_ln1,load_i_ln1,p4,p5,p6,gen1_f,gen2_f,p11,p13,p14,p15,p17,p18,p19,p20,p21,p22,load_v_ln2,load_i_ln2,p25,p26,p27,load_f,ac2_f,pad28,pad29,pad30) = struct.unpack('<5BIh1BBBhhhBBh6BIhBBBhhhhH6x', bytes)
+                (status,assoc,p1,p2,p3,load_v_ln1,load_i_ln1,p4,p5,p6,gen1_f,gen2_f,p11,p13,p14,p15,p17,p18,p19,p20,p21,p22,load_v_ln2,load_i_ln2,p25,p26,p27,load_f,ac2_f,pad28,pad29,pad30) = struct.unpack_from('<5BIh1BBBhhhBBh6BIhBBBhhhhH', bytes, 0)
                 load_i = load_i_ln1+load_i_ln2
 
                 load_p = p11+pad28
@@ -116,17 +131,17 @@ class XanbusSniffer(object):
             #                 LOAD_V_LN1 LOAD_I_LN1           GF1  GF2  p11        p15                    LOAD_V_LN_2   LOAD_I_LN2           LOAD_F AC2_F pad28      pad30               extra bytes from ac1 (grid)
             #b'03 43 fc 01 04 40d70100   5083        ff ff ff 9417 7017 e9f0 ff ff eaf0 ff ff ff 7f 02 04 80d80100      9a89        ff ff ff 9417   7017  adf1  ffff 75f1 ffff ff 7f0304 12b80300ffffff7fff94177017ffffffffffffffffff7fffffffffff' -- grid on (or gen2)
             #(state,assoc) = struct.unpack('<BB81x', bytes)
-            buffer1 = bytes[0:55]
-
-            (status,assoc,p1,p2,p3,ac1_in_v_ln1,ac1_i_ln1,p4,p5,p6,gen1_f,gen2_f,p11,p13,p14,p15,p17,p18,p19,p20,p21,p22,ac1_in_v_ln2,ac1_i_ln2,p25,p26,p27,load_f,ac2_f,pad28,pad29,pad30) = struct.unpack('<5BIh1BBBhhhBBh6BIhBBBhhhhH6x', buffer1)
+            (status,assoc,p1,p2,p3,ac1_in_v_ln1,ac1_i_ln1,p4,p5,p6,gen1_f,gen2_f,p11,p13,p14,p15,p17,p18,p19,p20,p21,p22,ac1_in_v_ln2,ac1_i_ln2,p25,p26,p27,load_f,ac2_f,pad28,pad29,pad30) = struct.unpack_from('<5BIh1BBBhhhBBh6BIhBBBhhhhH', bytes, 0)
             ac1_in_i = ac1_i_ln1+ac1_i_ln2
             ac1_in_p = p11+p15
 
             xw.values["GridACInputPower"] = ac1_in_p
 
             # 12b80300 ff ff ff 7f ff 9417 7017 ffffffffffffffffff7fffffffffff  (remaining part, 28 bytes)
-            buffer2 = bytes[55:83]
-            (load_v,pad,pad,pad,pad,pad,ac1_in_f,acX_in_f) = struct.unpack('<IBBBBBhh15x', buffer2)
+            # Extra grid block beyond the 55-byte prefix -- present on 83-byte
+            # XW+ responses; guarded for devices that send shorter payloads.
+            if len(bytes) >= 68:
+                (load_v,pad,pad,pad,pad,pad,ac1_in_f,acX_in_f) = struct.unpack_from('<IBBBBBhh', bytes, 55)
 
             #print(f'gen1_f={gen1_f} gen2_f={gen2_f}') # gen1_f == load_f == ac1_in_f
             #print(f'src={src} ac1_in_v_ln1={ac1_in_v_ln1/1000}v ac1_i_ln1={ac1_i_ln1/1000}A ac1_in_v_ln2={ac1_in_v_ln2/1000}v ac1_i_ln2={ac1_i_ln2/1000}A load_f={load_f} ac2_f={ac2_f} ac1_in_i={ac1_in_i/1000}A ac1_in_p={ac1_in_p:.0f}W p11={p11} p15={p15} pad28={pad28} pad29={pad29} pad30={pad30}')
@@ -140,7 +155,11 @@ class XanbusSniffer(object):
         device = self.all_xanbus_devices[src]
         
         #print(f'processDcSrcSts2: src = {src} len = {len(bytes)} bytes={binascii.hexlify(bytes)}')
-        (status,assoc,voltage,current,power) = struct.unpack('<BBIii13x', bytes)
+        # 27 bytes on an XW+ / MPPT 80 600 site, 21 on a Conext SW 4024 /
+        # MPPT 60 150 site -- prefix-stable layout, so unpack_from.
+        if len(bytes) < 14:
+            return
+        (status,assoc,voltage,current,power) = struct.unpack_from('<BBIii', bytes, 0)
         #print(f'src={src} DC batt voltage={voltage/1000}v current={current/1000}A power={power}W')
 
         # DC output - what is going to the battery
@@ -191,7 +210,11 @@ class XanbusSniffer(object):
         # TODO: decode the rest! --> 03, 05, 02
         #       chg_en_sts doesn't exist for the XW+ so it's likely not that value we are decoding
         # chg_mode = 1 == primary, 2 == secondary
-        (status,assoc,pad1,pad2,pad3,pad4,pad5,pad6,pad7,pad8,pad9,chg_en_sts,chg_sts,chg_mode) = struct.unpack('<BBBBBBBBBBBBHB5x', bytes)
+        # 20 bytes on an XW+ / MPPT 80 600 site, 17 on a Conext SW 4024 /
+        # MPPT 60 150 site -- prefix-stable layout, so unpack_from.
+        if len(bytes) < 15:
+            return
+        (status,assoc,pad1,pad2,pad3,pad4,pad5,pad6,pad7,pad8,pad9,chg_en_sts,chg_sts,chg_mode) = struct.unpack_from('<BBBBBBBBBBBBHB', bytes, 0)
 
         # chg_mode == 769 -> bulk, 770 -> absorb, 773 -> float,  see modbus doc, 777=qualifying ac
         #print(f'src={src} chg_en_sts={chg_en_sts} chg_sts={chg_sts} chg_mode={chg_mode}')
